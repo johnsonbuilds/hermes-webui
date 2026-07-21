@@ -4470,37 +4470,76 @@ function _renderRuntimeList(data, box) {
       interrupted: 'var(--warning)',
     }[run.status] || 'var(--muted)';
     
-    const started = run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '—';
-    const duration = run.duration_seconds ? `${run.duration_seconds}s` : '—';
+    const statusLabel = {
+      completed: 'Completed',
+      running: 'Running',
+      failed: 'Failed',
+      interrupted: 'Interrupted',
+    }[run.status] || (run.status || 'unknown');
+    
+    // Format duration to human-readable (e.g., "12 min", "2 hr")
+    const formatDuration = (seconds) => {
+      if (!seconds) return '—';
+      const s = Math.round(Number(seconds));
+      if (s < 60) return `${s}s`;
+      const mins = Math.floor(s / 60);
+      if (mins < 60) return `${mins} min`;
+      const hrs = Math.floor(mins / 60);
+      const remMins = mins % 60;
+      return remMins > 0 ? `${hrs} hr ${remMins} min` : `${hrs} hr`;
+    };
+    const durationStr = formatDuration(run.duration_seconds || 0);
+    
+    // Format started time to relative or compact (e.g., "Jul 20 16:47")
+    const formatTime = (timestamp) => {
+      if (!timestamp) return '—';
+      const d = new Date(timestamp * 1000);
+      const now = new Date();
+      const isToday = d.toDateString() === now.toDateString();
+      if (isToday) {
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' +
+             d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    };
+    const startedStr = run.started_at ? formatTime(run.started_at) : '—';
     
     // Look up session title from _allSessions (same pattern as chat panel)
-    let sessionTitle = '';
+    let taskName = '';
     if (run.session_id && typeof _allSessions !== 'undefined') {
       const session = _allSessions.find(s => s && s.session_id === run.session_id);
       if (session) {
-        // Use _sessionDisplayTitle if available, otherwise fall back to session.title
-        sessionTitle = (typeof _sessionDisplayTitle === 'function')
+        taskName = (typeof _sessionDisplayTitle === 'function')
           ? _sessionDisplayTitle(session)
-          : (session.title || session.display_title || 'Untitled');
+          : (session.title || session.display_title || '');
       }
     }
-    if (!sessionTitle || sessionTitle === 'Untitled') {
-      sessionTitle = run.session_id ? run.session_id.slice(0, 8) : 'Unknown';
+    if (!taskName || taskName === 'Untitled' || taskName === 'New Chat') {
+      taskName = 'Unnamed task';
     }
     
+    // Technical details for the fourth line
+    const runIdShort = run.run_id ? run.run_id.slice(0, 8) : '?';
+    const sessionIdShort = run.session_id ? run.session_id.slice(0, 8) : '?';
+    const fullStarted = run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '—';
+    const exactDuration = run.duration_seconds != null ? `${Math.round(run.duration_seconds)}s` : '—';
+    
     item.innerHTML = `
-      <div class="runtime-run-item-status" style="border-left:3px solid ${statusColor};padding-left:8px">
-        <strong>${esc(run.status || 'unknown')}</strong>
+      <div class="runtime-run-item-header">
+        <span class="runtime-run-item-task">${esc(taskName)}</span>
+        <span class="runtime-run-item-status-badge" style="border-left-color:${statusColor}">${esc(statusLabel)}</span>
       </div>
-      <div class="runtime-run-item-meta">
-        <span title="${esc(sessionTitle)}">${esc(sessionTitle)}</span>
-        <span>ID: <code>${esc(run.run_id?.slice(0, 8) || '?')}</code></span>
+      <div class="runtime-run-item-time">
+        <span class="runtime-run-item-duration">${esc(durationStr)}</span>
+        <span class="runtime-run-item-started">${esc(startedStr)}</span>
       </div>
-      <div class="runtime-run-item-stats">
-        <span>${duration}</span>
-        <span>${run.tool_calls || 0} tools</span>
-        <span>${run.event_count || 0} events</span>
-        <span>Started: ${esc(started)}</span>
+      <div class="runtime-run-item-counts">
+        <span>${run.tool_calls || 0} Tools</span>
+        <span>${run.event_count || 0} Events</span>
+      </div>
+      <div class="runtime-run-item-counts">
+        <span>Run: <code>${esc(runIdShort)}</code></span>
+        <span>Session: <code>${esc(sessionIdShort)}</code></span>
       </div>
     `;
     
@@ -4522,6 +4561,17 @@ async function openRuntimeRun(runId, sessionId, el) {
   _runtimeMode = 'read';
   _setRuntimeHeaderButtons('read');
   
+  // Look up session title for the header
+  let sessionTitle = 'Run Details';
+  if (sessionId && typeof _allSessions !== 'undefined') {
+    const session = _allSessions.find(s => s && s.session_id === sessionId);
+    if (session) {
+      sessionTitle = (typeof _sessionDisplayTitle === 'function')
+        ? _sessionDisplayTitle(session)
+        : (session.title || session.display_title || 'Run Details');
+    }
+  }
+  
   // Show loading in main view
   const body = $('runtimeDetailBody');
   const empty = $('runtimeDetailEmpty');
@@ -4531,7 +4581,7 @@ async function openRuntimeRun(runId, sessionId, el) {
   }
   if (empty) empty.style.display = 'none';
   
-  $('runtimeDetailTitle').textContent = `Run: ${runId?.slice(0, 8) || '?'}`;
+  $('runtimeDetailTitle').textContent = sessionTitle;
   
   try {
     const res = await api(`/api/runtime/runs/${runId}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`);
@@ -4554,17 +4604,54 @@ function _renderRuntimeRunDetail(data, box) {
   const summary = data.summary || {};
   const timeline = Array.isArray(data.timeline) ? data.timeline : [];
   
+  // Format duration to human-readable
+  const formatDuration = (seconds) => {
+    if (!seconds) return '—';
+    const s = Number(seconds);
+    if (s < 60) return `${s}s`;
+    const mins = Math.floor(s / 60);
+    if (mins < 60) return `${mins} min`;
+    const hrs = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return remMins > 0 ? `${hrs} hr ${remMins} min` : `${hrs} hr`;
+  };
+  
+  // Look up session title
+  let sessionTitle = 'Unknown session';
+  if (data.session_id && typeof _allSessions !== 'undefined') {
+    const session = _allSessions.find(s => s && s.session_id === data.session_id);
+    if (session) {
+      sessionTitle = (typeof _sessionDisplayTitle === 'function')
+        ? _sessionDisplayTitle(session)
+        : (session.title || session.display_title || 'Unknown session');
+    }
+  }
+  
+  const statusColor = {
+    completed: 'var(--success)',
+    running: 'var(--accent)',
+    failed: 'var(--danger)',
+    interrupted: 'var(--warning)',
+  }[summary.status] || 'var(--muted)';
+  
   let html = `
     <div class="insights-card" style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start">
-        <div>
-          <h3 style="margin:0 0 4px;font-size:16px">Run: <code>${esc(data.run_id?.slice(0, 8) || '?')}</code>…</h3>
-          <div style="color:var(--muted);font-size:12px">
-            Session: <code>${esc(data.session_id?.slice(0, 8) || '?')}</code>… |
-            Status: <strong>${esc(summary.status || 'unknown')}</strong> |
-            Duration: ${esc(String(summary.duration_seconds || '—'))}s |
-            Tools: ${summary.tool_calls || 0} | Events: ${summary.event_count || 0}
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:15px;font-weight:600;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sessionTitle)}</div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)">
+            <span style="display:inline-flex;align-items:center;gap:4px">
+              <span style="width:8px;height:8px;border-radius:50%;background:${statusColor};display:inline-block"></span>
+              <strong style="color:var(--text)">${esc(summary.status || 'unknown')}</strong>
+            </span>
+            <span>Duration: ${esc(formatDuration(summary.duration_seconds))}</span>
+            <span>${summary.tool_calls || 0} tools</span>
+            <span>${summary.event_count || 0} events</span>
           </div>
+        </div>
+        <div style="text-align:right;font-size:11px;color:var(--muted);flex-shrink:0">
+          <div>Run: <code>${esc(data.run_id?.slice(0, 8) || '?')}</code></div>
+          <div>Session: <code>${esc(data.session_id?.slice(0, 8) || '?')}</code></div>
         </div>
       </div>
     </div>
