@@ -4620,13 +4620,28 @@ function _renderRuntimeList(data, box) {
     const started = run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '—';
     const duration = run.duration_seconds ? `${run.duration_seconds}s` : '—';
     
+    // Look up session title from _allSessions (same pattern as chat panel)
+    let sessionTitle = '';
+    if (run.session_id && typeof _allSessions !== 'undefined') {
+      const session = _allSessions.find(s => s && s.session_id === run.session_id);
+      if (session) {
+        // Use _sessionDisplayTitle if available, otherwise fall back to session.title
+        sessionTitle = (typeof _sessionDisplayTitle === 'function')
+          ? _sessionDisplayTitle(session)
+          : (session.title || session.display_title || 'Untitled');
+      }
+    }
+    if (!sessionTitle || sessionTitle === 'Untitled') {
+      sessionTitle = run.session_id ? run.session_id.slice(0, 8) : 'Unknown';
+    }
+    
     item.innerHTML = `
       <div class="runtime-run-item-status" style="border-left:3px solid ${statusColor};padding-left:8px">
         <strong>${esc(run.status || 'unknown')}</strong>
       </div>
       <div class="runtime-run-item-meta">
+        <span title="${esc(sessionTitle)}">${esc(sessionTitle)}</span>
         <span>ID: <code>${esc(run.run_id?.slice(0, 8) || '?')}</code></span>
-        <span>Session: <code>${esc(run.session_id?.slice(0, 8) || '?')}</code></span>
       </div>
       <div class="runtime-run-item-stats">
         <span>${duration}</span>
