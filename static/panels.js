@@ -42,9 +42,9 @@ let _logsSeverityFilter = 'all';
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', runtime: 'tab_runtime', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','runtime','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -421,6 +421,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
+  if (nextPanel === 'runtime') await loadRuntimePanel();
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
@@ -4407,6 +4408,223 @@ async function loadInsights(animate) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
+  }
+}
+
+/**
+ * Load and render the Runtime Panel – shows run journal entries as a timeline.
+ */
+// ── Runtime Panel ──
+// Runtime panel follows the sidebar + main view pattern like Skills/Memory.
+// Sidebar (panelRuntime) lists runs; main view (mainRuntime) shows detail.
+let _runtimeData = null; // cached runs list
+let _currentRuntimeDetail = null; // { run_id, session_id }
+let _runtimeMode = 'empty'; // 'empty' | 'read'
+
+async function loadRuntimePanel(animate) {
+  _currentRuntimeDetail = null;
+  _runtimeMode = 'empty';
+  _setRuntimeHeaderButtons('empty');
+  const box = $('runtimeList');
+  const refreshBtn = $('runtimeRefreshBtn');
+  if (!box) return;
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
+  try {
+    const res = await api('/api/runtime/runs');
+    _runtimeData = res;
+    _renderRuntimeList(res, box);
+  } catch(e) {
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
+  } finally {
+    if (animate && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
+function _renderRuntimeList(data, box) {
+  const runs = Array.isArray(data?.runs) ? data.runs : [];
+  if (runs.length === 0) {
+    box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="runtime_no_runs">No runs found. Start a task to see runtime data here.</div>`;
+    return;
+  }
+  
+  const container = document.createElement('div');
+  container.className = 'runtime-list-items';
+  container.style.display = 'flex';
+  container.style.flexDirection = 'column';
+  container.style.gap = '4px';
+  
+  for (const run of runs) {
+    const item = document.createElement('div');
+    item.className = 'runtime-run-item';
+    
+    const statusColor = {
+      completed: 'var(--success)',
+      running: 'var(--accent)',
+      failed: 'var(--danger)',
+      interrupted: 'var(--warning)',
+    }[run.status] || 'var(--muted)';
+    
+    const started = run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '—';
+    const duration = run.duration_seconds ? `${run.duration_seconds}s` : '—';
+    
+    item.innerHTML = `
+      <div class="runtime-run-item-status" style="border-left:3px solid ${statusColor};padding-left:8px">
+        <strong>${esc(run.status || 'unknown')}</strong>
+      </div>
+      <div class="runtime-run-item-meta">
+        <span>ID: <code>${esc(run.run_id?.slice(0, 8) || '?')}</code></span>
+        <span>Session: <code>${esc(run.session_id?.slice(0, 8) || '?')}</code></span>
+      </div>
+      <div class="runtime-run-item-stats">
+        <span>${duration}</span>
+        <span>${run.tool_calls || 0} tools</span>
+        <span>${run.event_count || 0} events</span>
+        <span>Started: ${esc(started)}</span>
+      </div>
+    `;
+    
+    item.onclick = () => openRuntimeRun(run.run_id, run.session_id, item);
+    
+    container.appendChild(item);
+  }
+  
+  box.innerHTML = '';
+  box.appendChild(container);
+}
+
+async function openRuntimeRun(runId, sessionId, el) {
+  // Highlight active run in the sidebar list
+  document.querySelectorAll('.runtime-run-item').forEach(e => e.classList.remove('active'));
+  if (el) el.classList.add('active');
+  
+  _currentRuntimeDetail = { run_id: runId, session_id: sessionId };
+  _runtimeMode = 'read';
+  _setRuntimeHeaderButtons('read');
+  
+  // Show loading in main view
+  const body = $('runtimeDetailBody');
+  const empty = $('runtimeDetailEmpty');
+  if (body) {
+    body.style.display = '';
+    body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--muted)">Loading run details...</div>`;
+  }
+  if (empty) empty.style.display = 'none';
+  
+  $('runtimeDetailTitle').textContent = `Run: ${runId?.slice(0, 8) || '?'}`;
+  
+  try {
+    const res = await api(`/api/runtime/runs/${runId}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`);
+    _renderRuntimeRunDetail(res, body || $('runtimeDetailBody'));
+  } catch(e) {
+    if (body) {
+      body.innerHTML = `<div style="color:var(--accent);font-size:12px;text-align:center;padding:40px">${esc(t('error_prefix') + e.message)}</div>`;
+    }
+  }
+  
+  _closeMobileSidebarAfterPanelSelection();
+}
+
+function _renderRuntimeRunDetail(data, box) {
+  if (!data || !box) {
+    box && (box.innerHTML = `<div style="color:var(--muted);text-align:center;padding:40px">No data</div>`);
+    return;
+  }
+  
+  const summary = data.summary || {};
+  const timeline = Array.isArray(data.timeline) ? data.timeline : [];
+  
+  let html = `
+    <div class="insights-card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <h3 style="margin:0 0 4px;font-size:16px">Run: <code>${esc(data.run_id?.slice(0, 8) || '?')}</code>…</h3>
+          <div style="color:var(--muted);font-size:12px">
+            Session: <code>${esc(data.session_id?.slice(0, 8) || '?')}</code>… |
+            Status: <strong>${esc(summary.status || 'unknown')}</strong> |
+            Duration: ${esc(String(summary.duration_seconds || '—'))}s |
+            Tools: ${summary.tool_calls || 0} | Events: ${summary.event_count || 0}
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="insights-card">
+      <div class="insights-card-title">Timeline</div>
+      <div style="margin-top:12px">
+  `;
+  
+  if (timeline.length === 0) {
+    html += `<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">No timeline events</div>`;
+  } else {
+    for (const item of timeline) {
+      const statusColor = {
+        completed: 'var(--success)',
+        success: 'var(--success)',
+        running: 'var(--accent)',
+        failed: 'var(--danger)',
+        error: 'var(--danger)',
+        interrupted: 'var(--warning)',
+        pending: 'var(--muted)',
+        timeout: 'var(--danger)',
+        warning: 'var(--warning)',
+      }[item.status] || 'var(--muted)';
+      
+      const time = item.timestamp ? new Date(item.timestamp * 1000).toLocaleTimeString() : '';
+      const duration = item.duration_seconds ? ` (${item.duration_seconds}s)` : '';
+      
+      html += `
+        <div style="display:flex;align-items:flex-start;gap:12px;padding:8px 0;border-bottom:1px solid var(--border2)">
+          <div style="width:8px;height:8px;border-radius:50%;background:${statusColor};margin-top:6px;flex-shrink:0"></div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:13px">
+              <strong>${esc(item.title || item.type)}</strong>
+              ${duration}
+            </div>
+            <div style="font-size:11px;color:var(--muted)">${time}</div>
+            ${item.details ? _renderRuntimeItemDetails(item.details) : ''}
+          </div>
+        </div>
+      `;
+    }
+  }
+  
+  html += `</div></div>`;
+  box.innerHTML = html;
+}
+
+function _renderRuntimeItemDetails(details) {
+  if (!details || typeof details !== 'object') return '';
+  let html = '<div style="margin-top:4px;font-size:11px;color:var(--muted)">';
+  const parts = [];
+  for (const [key, value] of Object.entries(details)) {
+    if (value && typeof value === 'string') {
+      parts.push(`<span>${esc(key)}: ${esc(value.slice(0, 100))}</span>`);
+    }
+  }
+  if (parts.length > 0) {
+    html += parts.join(' | ');
+  }
+  html += '</div>';
+  return html;
+}
+
+function _setRuntimeHeaderButtons(mode) {
+  const header = $('mainRuntime')?.querySelector('.main-view-header');
+  const refreshBtn = $('btnRefreshRuntimeDetail');
+  const show = b => b && (b.style.display = '');
+  const hide = b => b && (b.style.display = 'none');
+  
+  if (mode === 'read') {
+    if (header) header.style.display = 'flex';
+    show(refreshBtn);
+  } else if (mode === 'empty') {
+    if (header) header.style.display = 'none';
+    hide(refreshBtn);
   }
 }
 

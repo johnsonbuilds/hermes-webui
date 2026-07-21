@@ -11674,6 +11674,49 @@ def _webui_plugin_payload() -> list[dict]:
         return []
 
 
+# ── Runtime Panel Handlers ─────────────────────────────────────────────
+
+def _handle_runtime_runs(handler, parsed) -> bool:
+    """Return the list of all runs from the Run Journal for the Runtime Panel."""
+    try:
+        from api.runtime_panel import get_run_list
+        data = get_run_list()
+        return j(handler, data)
+    except Exception as exc:
+        logger.warning("Runtime panel: failed to list runs: %s", exc)
+        return j(handler, {"runs": [], "total": 0, "error": str(exc)}, status=500)
+
+
+def _handle_runtime_run_detail(handler, parsed) -> bool:
+    """Return timeline details for a single run.
+    
+    Expected path: /api/runtime/runs/<run_id>
+    Query params: session_id (optional)
+    """
+    try:
+        from api.runtime_panel import build_run_timeline
+        
+        # Extract run_id from path: /api/runtime/runs/<run_id>
+        path_suffix = parsed.path[len("/api/runtime/runs/"):]
+        run_id = path_suffix.split("?")[0].strip()
+        
+        if not run_id:
+            return bad(handler, "run_id is required", status=400)
+        
+        # Parse query params
+        query = parse_qs(parsed.query or {})
+        session_id = query.get("session_id", [None])[0]
+        
+        timeline = build_run_timeline(run_id, session_id=session_id)
+        if timeline is None:
+            return bad(handler, f"Run {run_id} not found", status=404)
+        
+        return j(handler, timeline)
+    except Exception as exc:
+        logger.warning("Runtime panel: failed to get run detail: %s", exc, exc_info=True)
+        return j(handler, {"error": str(exc)}, status=500)
+
+
 def _handle_plugins(handler, parsed) -> bool:
     try:
         hermes_plugins = _plugin_visibility_payload()
@@ -12240,6 +12283,12 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"content": content, "path": page_path})
     if parsed.path == "/api/logs":
         return _handle_logs(handler, parsed)
+
+    # ── Runtime Panel (GET/POST) ──
+    if parsed.path == "/api/runtime/runs":
+        return _handle_runtime_runs(handler, parsed)
+    if parsed.path.startswith("/api/runtime/runs/"):
+        return _handle_runtime_run_detail(handler, parsed)
 
     if parsed.path == "/health":
         return _handle_health(handler, parsed)

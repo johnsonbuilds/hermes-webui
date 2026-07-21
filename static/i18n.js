@@ -1057,6 +1057,7 @@ const LOCALES = {
     tab_insights: 'Insights',
     tab_dashboard: 'Hermes Dashboard',
     dashboard_loopback_warning: 'Dashboard is loopback-only on the server. Either browse from the server itself or restart it with --host 0.0.0.0 (insecure).',
+    tab_runtime: 'Runtime',
     tab_logs: 'Logs',
     tab_settings: 'Settings',
     close_menu: 'Close menu',
@@ -1091,6 +1092,10 @@ const LOCALES = {
     logs_empty: 'No log lines yet.',
     logs_loading: 'Loading logs…',
     logs_load_failed: 'Logs failed to load',
+    // Runtime Panel
+    runtime_title: 'Runtime Panel',
+    runtime_loading: 'Loading runtime data...',
+    runtime_no_runs: 'No runs found. Start a task to see runtime data here.',
     logs_status_idle: 'Choose a log file to view recent lines.',
     logs_no_mtime: 'not written yet',
     logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',
