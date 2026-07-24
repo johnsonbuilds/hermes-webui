@@ -4602,18 +4602,22 @@ function _renderRuntimeRunDetail(data, box) {
   }
   
   const summary = data.summary || {};
+  const reliability = data.reliability || {};
   const timeline = Array.isArray(data.timeline) ? data.timeline : [];
   
-  // Format duration to human-readable
+  // Format duration to human-readable (e.g. 120ms, 4.2s, 12m 14s)
   const formatDuration = (seconds) => {
-    if (!seconds) return '—';
+    if (seconds === undefined || seconds === null || seconds === '—') return '—';
     const s = Number(seconds);
-    if (s < 60) return `${s}s`;
+    if (isNaN(s)) return '—';
+    if (s < 1) return `${Math.round(s * 1000)}ms`;
+    if (s < 60) return `${s.toFixed(1)}s`;
     const mins = Math.floor(s / 60);
-    if (mins < 60) return `${mins} min`;
+    const remSecs = Math.round(s % 60);
+    if (mins < 60) return remSecs > 0 ? `${mins}m ${remSecs}s` : `${mins}m`;
     const hrs = Math.floor(mins / 60);
     const remMins = mins % 60;
-    return remMins > 0 ? `${hrs} hr ${remMins} min` : `${hrs} hr`;
+    return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
   };
   
   // Look up session title
@@ -4633,20 +4637,34 @@ function _renderRuntimeRunDetail(data, box) {
     failed: 'var(--danger)',
     interrupted: 'var(--warning)',
   }[summary.status] || 'var(--muted)';
+
+  // Build Reliability Snapshot badges
+  let relBadge = '<span class="flow-step-badge flow-step-badge--success">All Steps Succeeded</span>';
+  if (reliability.failed_steps > 0) {
+    relBadge = `<span class="flow-step-badge flow-step-badge--failed">❌ ${reliability.failed_steps} Step Failed</span>`;
+  } else if (reliability.slow_steps > 0) {
+    relBadge = `<span class="flow-step-badge flow-step-badge--slow">⚠️ ${reliability.slow_steps} Slow Step(s)</span>`;
+  }
+
+  let bottleneckHtml = '';
+  if (reliability.slowest_step && reliability.slowest_step.duration_seconds >= 1.0) {
+    bottleneckHtml = `<span>🐢 Slowest: <strong>${esc(reliability.slowest_step.title || 'Step')}</strong> (${formatDuration(reliability.slowest_step.duration_seconds)})</span>`;
+  }
   
   let html = `
     <div class="insights-card" style="margin-bottom:12px">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
         <div style="min-width:0;flex:1">
-          <div style="font-size:15px;font-weight:600;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sessionTitle)}</div>
+          <div style="font-size:16px;font-weight:600;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sessionTitle)}</div>
           <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)">
             <span style="display:inline-flex;align-items:center;gap:4px">
               <span style="width:8px;height:8px;border-radius:50%;background:${statusColor};display:inline-block"></span>
-              <strong style="color:var(--text)">${esc(summary.status || 'unknown')}</strong>
+              <strong style="color:var(--text);text-transform:capitalize">${esc(summary.status || 'unknown')}</strong>
             </span>
-            <span>Duration: ${esc(formatDuration(summary.duration_seconds))}</span>
-            <span>${summary.tool_calls || 0} tools</span>
-            <span>${summary.event_count || 0} events</span>
+            <span>Duration: <strong>${esc(formatDuration(summary.duration_seconds))}</strong></span>
+            <span>${reliability.total_steps || timeline.length} Steps</span>
+            ${relBadge}
+            ${bottleneckHtml}
           </div>
         </div>
         <div style="text-align:right;font-size:11px;color:var(--muted);flex-shrink:0">
@@ -4655,64 +4673,119 @@ function _renderRuntimeRunDetail(data, box) {
         </div>
       </div>
     </div>
+
     <div class="insights-card">
-      <div class="insights-card-title">Timeline</div>
-      <div style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="insights-card-title" style="font-size:14px;font-weight:600">Execution Flow</div>
+        <span style="font-size:11px;color:var(--muted)">${timeline.length} Steps</span>
+      </div>
+      <div class="flow-container">
   `;
   
   if (timeline.length === 0) {
-    html += `<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">No timeline events</div>`;
+    html += `<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">No execution steps logged</div>`;
   } else {
-    for (const item of timeline) {
-      const statusColor = {
-        completed: 'var(--success)',
-        success: 'var(--success)',
-        running: 'var(--accent)',
-        failed: 'var(--danger)',
-        error: 'var(--danger)',
-        interrupted: 'var(--warning)',
-        pending: 'var(--muted)',
-        timeout: 'var(--danger)',
-        warning: 'var(--warning)',
-      }[item.status] || 'var(--muted)';
-      
-      const time = item.timestamp ? new Date(item.timestamp * 1000).toLocaleTimeString() : '';
-      const duration = item.duration_seconds ? ` (${item.duration_seconds}s)` : '';
-      
+    timeline.forEach((item, idx) => {
+      const stepId = `flow_step_${idx}`;
+      const icon = item.icon || '📌';
+      const title = item.title || item.type || 'Step';
+      const target = item.target || '';
+      const durStr = item.duration_seconds ? formatDuration(item.duration_seconds) : '';
+      const isSlow = item.is_slow || item.duration_seconds >= 30.0;
+      const isFailed = item.status === 'failed' || item.status === 'error';
+      const isRunning = item.status === 'running';
+
+      let stepClass = 'flow-step';
+      if (isFailed) stepClass += ' flow-step--failed';
+      else if (isSlow) stepClass += ' flow-step--slow';
+
+      let badgeClass = 'flow-step-badge--info';
+      let badgeLabel = item.status || 'done';
+      if (isFailed) {
+        badgeClass = 'flow-step-badge--failed';
+        badgeLabel = item.details?.exit_code !== undefined ? `Exit ${item.details.exit_code}` : 'Failed';
+      } else if (isSlow) {
+        badgeClass = 'flow-step-badge--slow';
+        badgeLabel = 'Slow';
+      } else if (isRunning) {
+        badgeClass = 'flow-step-badge--running';
+        badgeLabel = 'Running';
+      } else if (item.status === 'success' || item.status === 'completed') {
+        badgeClass = 'flow-step-badge--success';
+        badgeLabel = 'Completed';
+      }
+
       html += `
-        <div style="display:flex;align-items:flex-start;gap:12px;padding:8px 0;border-bottom:1px solid var(--border2)">
-          <div style="width:8px;height:8px;border-radius:50%;background:${statusColor};margin-top:6px;flex-shrink:0"></div>
-          <div style="flex:1;min-width:0">
-            <div style="font-size:13px">
-              <strong>${esc(item.title || item.type)}</strong>
-              ${duration}
+        <div class="${stepClass}">
+          <div class="flow-step-header" onclick="document.getElementById('${stepId}').toggleAttribute('hidden')">
+            <div class="flow-step-main">
+              <span class="flow-step-icon">${icon}</span>
+              <div class="flow-step-title-group">
+                <div class="flow-step-title">
+                  <span>${esc(title)}</span>
+                </div>
+                ${target ? `<div class="flow-step-target">${esc(target)}</div>` : ''}
+              </div>
             </div>
-            <div style="font-size:11px;color:var(--muted)">${time}</div>
-            ${item.details ? _renderRuntimeItemDetails(item.details) : ''}
+            <div class="flow-step-meta">
+              ${durStr ? `<span class="flow-step-duration">${esc(durStr)}</span>` : ''}
+              <span class="flow-step-badge ${badgeClass}">${esc(badgeLabel)}</span>
+            </div>
+          </div>
+          
+          <div class="flow-step-details" id="${stepId}" hidden>
+            ${isFailed && item.details?.error ? `
+              <div class="flow-step-callout flow-step-callout--danger">
+                <span>❌ <strong>Error:</strong> ${esc(item.details.error)}</span>
+              </div>
+            ` : ''}
+
+            ${isSlow ? `
+              <div class="flow-step-callout flow-step-callout--warning">
+                <span>⚠️ <strong>Slow Execution:</strong> Step took ${esc(durStr)} to complete.</span>
+              </div>
+            ` : ''}
+
+            ${item.details?.text ? `
+              <div>
+                <strong style="color:var(--text)">Thinking / Reasoning:</strong>
+                <pre>${esc(item.details.text)}</pre>
+              </div>
+            ` : ''}
+
+            ${item.details?.command ? `
+              <div>
+                <strong style="color:var(--text)">Command:</strong>
+                <pre>${esc(item.details.command)}</pre>
+              </div>
+            ` : ''}
+
+            ${item.details?.result ? `
+              <div>
+                <strong style="color:var(--text)">Result Preview:</strong>
+                <pre>${esc(item.details.result)}</pre>
+              </div>
+            ` : ''}
+
+            ${item.details?.args && Object.keys(item.details.args).length > 0 ? `
+              <div>
+                <strong style="color:var(--text)">Arguments:</strong>
+                <pre>${esc(JSON.stringify(item.details.args, null, 2))}</pre>
+              </div>
+            ` : ''}
+
+            <div style="font-size:10px;color:var(--muted);display:flex;gap:12px;margin-top:4px">
+              <span>Seq: ${item.seq || '—'}</span>
+              <span>Timestamp: ${item.timestamp ? new Date(item.timestamp * 1000).toLocaleString() : '—'}</span>
+            </div>
           </div>
         </div>
       `;
-    }
+    });
   }
   
   html += `</div></div>`;
   box.innerHTML = html;
-}
-
-function _renderRuntimeItemDetails(details) {
-  if (!details || typeof details !== 'object') return '';
-  let html = '<div style="margin-top:4px;font-size:11px;color:var(--muted)">';
-  const parts = [];
-  for (const [key, value] of Object.entries(details)) {
-    if (value && typeof value === 'string') {
-      parts.push(`<span>${esc(key)}: ${esc(value.slice(0, 100))}</span>`);
-    }
-  }
-  if (parts.length > 0) {
-    html += parts.join(' | ');
-  }
-  html += '</div>';
-  return html;
 }
 
 function _setRuntimeHeaderButtons(mode) {
