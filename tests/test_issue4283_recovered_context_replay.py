@@ -314,6 +314,21 @@ def test_materialize_does_not_duplicate_context_messages():
     assert len(s.context_messages) == ctx_len_after_first
 
 
+def test_materialize_does_not_append_user_after_partial_result():
+    """An error after a returned partial answer must not append the prompt again."""
+    s = _DummySession(
+        messages=[
+            {"role": "user", "content": "same prompt", "timestamp": 1778098700},
+            {"role": "assistant", "content": "partial answer"},
+        ],
+        context_messages=[{"role": "user", "content": "same prompt", "timestamp": 1778098700}],
+        pending_msg="same prompt",
+    )
+
+    assert _materialize_pending_user_turn_before_error(s) is False
+    assert [m["role"] for m in s.messages] == ["user", "assistant"]
+
+
 def test_materialize_skips_mirror_when_context_messages_empty():
     """When context_messages is empty/None (first-turn error), the mirror
     should be skipped — prefer_context falls back to session.messages.

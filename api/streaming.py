@@ -6245,7 +6245,11 @@ def _partial_marker_already_present(messages, candidate: dict, *, before_idx: in
             break
     candidate_sig = _partial_message_signature(candidate)
     for msg in messages[start:end]:
-        if isinstance(msg, dict) and msg.get('_partial') and _partial_message_signature(msg) == candidate_sig:
+        if (
+            isinstance(msg, dict)
+            and msg.get('role') == 'assistant'
+            and _partial_message_signature(msg) == candidate_sig
+        ):
             return True
     return False
 
@@ -6329,20 +6333,22 @@ def _materialize_pending_user_turn_before_error(session) -> bool:
     def is_exact_checkpoint(messages):
         if not isinstance(messages, list) or not messages:
             return False
-        existing = messages[-1]
-        if not isinstance(existing, dict) or existing.get('role') != 'user':
-            return False
-        existing_source = existing.get('_source') or 'webui'
-        try:
-            existing_ts = int(existing.get('timestamp'))
-        except (TypeError, ValueError):
-            return False
-        return (
-            _normalize_user_text(existing.get('content')) == _normalize_user_text(pending_text)
-            and existing_ts == recovered_ts
-            and existing_source == pending_source
-            and list(existing.get('attachments') or []) == pending_attachments
-        )
+        for existing in reversed(messages):
+            if not isinstance(existing, dict) or existing.get('role') != 'user':
+                continue
+            existing_source = existing.get('_source') or 'webui'
+            try:
+                existing_ts = int(existing.get('timestamp'))
+            except (TypeError, ValueError):
+                continue
+            if (
+                _normalize_user_text(existing.get('content')) == _normalize_user_text(pending_text)
+                and existing_ts == recovered_ts
+                and existing_source == pending_source
+                and list(existing.get('attachments') or []) == pending_attachments
+            ):
+                return True
+        return False
 
     if is_exact_checkpoint(getattr(session, 'messages', None)):
         return False
