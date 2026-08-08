@@ -1426,6 +1426,26 @@ def _drop_synthetic_control_messages(messages):
     ]
 
 
+_AGENT_CONTINUATION_PROMPT_PREFIXES = (
+    '[system: the previous response was truncated by the output length limit.',
+    '[system: the previous response was cut off by a network error mid-stream.',
+    '[system: your previous tool call ',
+)
+
+
+def _is_agent_continuation_prompt(message) -> bool:
+    """Identify Agent-internal retry prompts that must not become transcript turns."""
+    if not isinstance(message, dict) or message.get('role') != 'user':
+        return False
+    text = ' '.join(_message_text(message.get('content', '')).split()).lower()
+    return any(text.startswith(prefix) for prefix in _AGENT_CONTINUATION_PROMPT_PREFIXES)
+
+
+def _drop_agent_continuation_prompts(messages):
+    """Remove internal length/network continuation prompts from returned history."""
+    return [msg for msg in list(messages or []) if not _is_agent_continuation_prompt(msg)]
+
+
 def _agent_result_tool_limit_reached(result) -> bool:
     """Return True when current-turn metadata says the tool iteration cap fired."""
     if not isinstance(result, dict):
@@ -4961,7 +4981,7 @@ def _strip_replayed_context_items(existing_messages, candidates):
 def _dedupe_replayed_context_messages(previous_context, result_messages, msg_text=None):
     """Keep model context append-only without replayed blocks/summaries."""
     previous_context = list(previous_context or [])
-    result_messages = list(result_messages or [])
+    result_messages = _drop_agent_continuation_prompts(result_messages)
     if not previous_context or not result_messages:
         return result_messages
     previous_user_tail = _stale_user_tail_candidate(_last_user_row(previous_context))
@@ -5554,7 +5574,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         )
     previous_display = _deduped
     previous_context = list(previous_context or [])
-    result_messages = list(result_messages or [])
+    result_messages = _drop_agent_continuation_prompts(result_messages)
     # Same marker filter for the model-history inputs: the synthetic verify-loop
     # answer/nudge live in the agent's returned messages and prior context, and
     # would otherwise slip into the merged transcript as a real delta. (#5334)
@@ -8970,7 +8990,9 @@ def _run_agent_streaming(
                         return
                 with _stream_writeback_stage(_writeback_timings, "merge_result"):
                     _tool_limit_reached = _agent_result_tool_limit_reached(result)
-                    _result_messages = result.get('messages') or _previous_context_messages
+                    _result_messages = _drop_agent_continuation_prompts(
+                        result.get('messages') or _previous_context_messages
+                    )
                     _result_messages = _drop_synthetic_max_iteration_summary_requests(
                         _result_messages,
                         enabled=_tool_limit_reached,
@@ -9352,7 +9374,9 @@ def _run_agent_streaming(
                                 # evaluates False on next conceptual pass.
                                 # Since we're in a flat block, directly run the
                                 # post-result merge logic here.
-                                _result_messages = result.get('messages') or _previous_context_messages
+                                _result_messages = _drop_agent_continuation_prompts(
+                                    result.get('messages') or _previous_context_messages
+                                )
                                 _result_messages = _drop_synthetic_max_iteration_summary_requests(
                                     _result_messages,
                                     enabled=_agent_result_tool_limit_reached(result),
@@ -10568,7 +10592,9 @@ def _run_agent_streaming(
                                         getattr(s, 'active_stream_id', None),
                                     )
                                     return
-                                _result_messages = _heal_result.get('messages') or _previous_context_messages
+                                _result_messages = _drop_agent_continuation_prompts(
+                                    _heal_result.get('messages') or _previous_context_messages
+                                )
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )

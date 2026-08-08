@@ -146,6 +146,49 @@ def test_merge_display_messages_dedup_via_prefix():
     assert merged[3]["content"] == "answer"
 
 
+def test_truncated_continuation_prompt_does_not_split_duplicate_reply():
+    """Agent retry prompts are internal and must not split repeated partial text."""
+    from api.streaming import _merge_display_messages_after_agent_result
+
+    previous_display = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "old reply"}]
+    previous_context = list(previous_display)
+    result_messages = previous_context + [
+        {"role": "user", "content": "A"},
+        {"role": "assistant", "content": "B"},
+        {
+            "role": "user",
+            "content": "[System: The previous response was truncated by the output length limit. "
+            "Continue exactly where you left off. Do not restart or repeat prior text. "
+            "Finish the answer directly.]",
+        },
+        {"role": "assistant", "content": "B"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display + [{"role": "user", "content": "A"}],
+        previous_context,
+        result_messages,
+        "A",
+    )
+
+    assert [(m["role"], m["content"]) for m in merged] == [
+        ("user", "old"),
+        ("assistant", "old reply"),
+        ("user", "A"),
+        ("assistant", "B"),
+    ]
+
+
+def test_continuation_prompt_detector_handles_tool_retry_variant():
+    from api.streaming import _is_agent_continuation_prompt
+
+    assert _is_agent_continuation_prompt({
+        "role": "user",
+        "content": "[System: Your previous tool call (patch) was too large and the stream timed out.",
+    })
+    assert not _is_agent_continuation_prompt({"role": "user", "content": "A"})
+
+
 def test_merge_display_messages_preserves_current_user_turn():
     """The current user turn replacement logic should still work."""
     from api.streaming import _merge_display_messages_after_agent_result
