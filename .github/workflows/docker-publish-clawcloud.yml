@@ -1,0 +1,243 @@
+name: Docker Publish(ClawCloud)
+
+# Fork image: upstream WebUI + runtime-panel customizations (see
+# upstream-sync-instructions.md). Multi-arch amd64/arm64, same digest-merge
+# pattern as the hermes-agent fork's docker-publish-getclawcloud.yml.
+#
+# Tags: always :latest; :sha-<sha> on main pushes; :<tag> on v* tags.
+# PRs only validate the build (no push, no cache write).
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - clawcloud
+    tags:
+      - v*
+  pull_request:
+    branches:
+      - main
+      - master
+      - clawcloud
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-clawcloud-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.img.outputs.image }}
+    steps:
+      - name: Compute lowercase image name
+        id: img
+        run: |
+          image="${REGISTRY}/${GITHUB_REPOSITORY}"
+          image=$(echo "${image}" | tr '[:upper:]' '[:lower:]')
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+  build-amd64:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (amd64, PR validation)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: false
+          build-args: |
+            HERMES_VERSION=${{ github.sha }}
+          cache-from: type=registry,ref=${{ needs.prepare.outputs.image }}:buildcache-amd64
+
+      - name: Build and push amd64 by digest
+        id: build
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            HERMES_VERSION=${{ github.sha }}
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=${{ needs.prepare.outputs.image }}:buildcache-amd64
+          cache-to: type=registry,ref=${{ needs.prepare.outputs.image }}:buildcache-amd64,mode=max
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-amd64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  build-arm64:
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (arm64, PR validation)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: false
+          build-args: |
+            HERMES_VERSION=${{ github.sha }}
+          cache-from: type=registry,ref=${{ needs.prepare.outputs.image }}:buildcache-arm64
+
+      - name: Build and push arm64 by digest
+        id: build
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            HERMES_VERSION=${{ github.sha }}
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=registry,ref=${{ needs.prepare.outputs.image }}:buildcache-arm64
+          cache-to: type=registry,ref=${{ needs.prepare.outputs.image }}:buildcache-arm64,mode=max
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-arm64
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [prepare, build-amd64, build-arm64]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+        run: |
+          set -euo pipefail
+          args=()
+          for digest_file in *; do
+            args+=("${IMAGE}@sha256:${digest_file}")
+          done
+
+          tag_args=(-t "${IMAGE}:latest")
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag_args+=(-t "${IMAGE}:${GITHUB_REF_NAME}")
+          else
+            tag_args+=(-t "${IMAGE}:sha-${GITHUB_SHA}")
+          fi
+
+          docker buildx imagetools create "${tag_args[@]}" "${args[@]}"
+
+      - name: Smoke check (webui /health without agent source)
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+        run: |
+          set -euo pipefail
+          # No agent source mount: docker_init.bash starts with reduced
+          # functionality, which is enough to prove the image boots and
+          # serves. HERMES_WEBUI_STATE_DIR is required by the entrypoint.
+          cid=$(docker run -d -p 18787:8787 \
+            -e HERMES_WEBUI_STATE_DIR=/tmp/webui-state \
+            "${IMAGE}:latest")
+          trap 'docker rm -f "$cid" >/dev/null' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18787/health >/dev/null 2>&1; then
+              echo "webui /health OK"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "webui /health never became ready"
+          docker logs "$cid" | tail -n 50
+          exit 1
+
+      - name: Inspect image
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:latest"

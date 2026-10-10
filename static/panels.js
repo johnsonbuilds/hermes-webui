@@ -43,9 +43,9 @@ let _logsSeverityFilter = 'all';
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
-  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
+  profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', runtime: 'tab_runtime', settings: 'tab_settings',
 };
-const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','plugin'];
+const MAIN_VIEW_PANELS = ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','runtime','plugin'];
 const MAIN_VIEW_SIDEBAR_PANEL_FALLBACKS = { plugin: 'settings' };
 
 /**
@@ -468,6 +468,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
+  if (nextPanel === 'runtime') await loadRuntimePanel();
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
@@ -4554,6 +4555,398 @@ async function loadInsights(animate) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
+  }
+}
+
+/**
+ * Load and render the Runtime Panel – shows run journal entries as a timeline.
+ */
+// ── Runtime Panel ──
+// Runtime panel follows the sidebar + main view pattern like Skills/Memory.
+// Sidebar (panelRuntime) lists runs; main view (mainRuntime) shows detail.
+let _runtimeData = null; // cached runs list
+let _currentRuntimeDetail = null; // { run_id, session_id }
+let _runtimeMode = 'empty'; // 'empty' | 'read'
+
+async function loadRuntimePanel(animate) {
+  _currentRuntimeDetail = null;
+  _runtimeMode = 'empty';
+  _setRuntimeHeaderButtons('empty');
+  const box = $('runtimeList');
+  const refreshBtn = $('runtimeRefreshBtn');
+  if (!box) return;
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
+  try {
+    const res = await api('/api/runtime/runs');
+    _runtimeData = res;
+    _renderRuntimeList(res, box);
+  } catch(e) {
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
+  } finally {
+    if (animate && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
+function _renderRuntimeList(data, box) {
+  const runs = Array.isArray(data?.runs) ? data.runs : [];
+  if (runs.length === 0) {
+    box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="runtime_no_runs">No runs found. Start a task to see runtime data here.</div>`;
+    return;
+  }
+  
+  const container = document.createElement('div');
+  container.className = 'runtime-list-items';
+  container.style.display = 'flex';
+  container.style.flexDirection = 'column';
+  container.style.gap = '4px';
+  
+  for (const run of runs) {
+    const item = document.createElement('div');
+    item.className = 'runtime-run-item';
+    
+    const statusColor = {
+      completed: 'var(--success)',
+      running: 'var(--accent)',
+      failed: 'var(--danger)',
+      interrupted: 'var(--warning)',
+    }[run.status] || 'var(--muted)';
+    
+    const statusLabel = {
+      completed: 'Completed',
+      running: 'Running',
+      failed: 'Failed',
+      interrupted: 'Interrupted',
+    }[run.status] || (run.status || 'unknown');
+    
+    // Format duration to human-readable (e.g., "12 min", "2 hr")
+    const formatDuration = (seconds) => {
+      if (!seconds) return '—';
+      const s = Math.round(Number(seconds));
+      if (s < 60) return `${s}s`;
+      const mins = Math.floor(s / 60);
+      if (mins < 60) return `${mins} min`;
+      const hrs = Math.floor(mins / 60);
+      const remMins = mins % 60;
+      return remMins > 0 ? `${hrs} hr ${remMins} min` : `${hrs} hr`;
+    };
+    const durationStr = formatDuration(run.duration_seconds || 0);
+    
+    // Format started time to relative or compact (e.g., "Jul 20 16:47")
+    const formatTime = (timestamp) => {
+      if (!timestamp) return '—';
+      const d = new Date(timestamp * 1000);
+      const now = new Date();
+      const isToday = d.toDateString() === now.toDateString();
+      if (isToday) {
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      }
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' +
+             d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    };
+    const startedStr = run.started_at ? formatTime(run.started_at) : '—';
+    
+    // Look up session title from _allSessions (same pattern as chat panel)
+    let taskName = '';
+    if (run.session_id && typeof _allSessions !== 'undefined') {
+      const session = _allSessions.find(s => s && s.session_id === run.session_id);
+      if (session) {
+        taskName = (typeof _sessionDisplayTitle === 'function')
+          ? _sessionDisplayTitle(session)
+          : (session.title || session.display_title || '');
+      }
+    }
+    if (!taskName || taskName === 'Untitled' || taskName === 'New Chat') {
+      taskName = 'Unnamed task';
+    }
+    
+    // Technical details for the fourth line
+    const runIdShort = run.run_id ? run.run_id.slice(0, 8) : '?';
+    const sessionIdShort = run.session_id ? run.session_id.slice(0, 8) : '?';
+    const fullStarted = run.started_at ? new Date(run.started_at * 1000).toLocaleString() : '—';
+    const exactDuration = run.duration_seconds != null ? `${Math.round(run.duration_seconds)}s` : '—';
+    
+    item.innerHTML = `
+      <div class="runtime-run-item-header">
+        <span class="runtime-run-item-task">${esc(taskName)}</span>
+        <span class="runtime-run-item-status-badge" style="border-left-color:${statusColor}">${esc(statusLabel)}</span>
+      </div>
+      <div class="runtime-run-item-time">
+        <span class="runtime-run-item-duration">${esc(durationStr)}</span>
+        <span class="runtime-run-item-started">${esc(startedStr)}</span>
+      </div>
+      <div class="runtime-run-item-counts">
+        <span>${run.tool_calls || 0} Tools</span>
+        <span>${run.event_count || 0} Events</span>
+      </div>
+      <div class="runtime-run-item-counts">
+        <span>Run: <code>${esc(runIdShort)}</code></span>
+        <span>Session: <code>${esc(sessionIdShort)}</code></span>
+      </div>
+    `;
+    
+    item.onclick = () => openRuntimeRun(run.run_id, run.session_id, item);
+    
+    container.appendChild(item);
+  }
+  
+  box.innerHTML = '';
+  box.appendChild(container);
+}
+
+async function openRuntimeRun(runId, sessionId, el) {
+  // Highlight active run in the sidebar list
+  document.querySelectorAll('.runtime-run-item').forEach(e => e.classList.remove('active'));
+  if (el) el.classList.add('active');
+  
+  _currentRuntimeDetail = { run_id: runId, session_id: sessionId };
+  _runtimeMode = 'read';
+  _setRuntimeHeaderButtons('read');
+  
+  // Look up session title for the header
+  let sessionTitle = 'Run Details';
+  if (sessionId && typeof _allSessions !== 'undefined') {
+    const session = _allSessions.find(s => s && s.session_id === sessionId);
+    if (session) {
+      sessionTitle = (typeof _sessionDisplayTitle === 'function')
+        ? _sessionDisplayTitle(session)
+        : (session.title || session.display_title || 'Run Details');
+    }
+  }
+  
+  // Show loading in main view
+  const body = $('runtimeDetailBody');
+  const empty = $('runtimeDetailEmpty');
+  if (body) {
+    body.style.display = '';
+    body.innerHTML = `<div style="text-align:center;padding:40px;color:var(--muted)">Loading run details...</div>`;
+  }
+  if (empty) empty.style.display = 'none';
+  
+  $('runtimeDetailTitle').textContent = sessionTitle;
+  
+  try {
+    const res = await api(`/api/runtime/runs/${runId}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`);
+    _renderRuntimeRunDetail(res, body || $('runtimeDetailBody'));
+  } catch(e) {
+    if (body) {
+      body.innerHTML = `<div style="color:var(--accent);font-size:12px;text-align:center;padding:40px">${esc(t('error_prefix') + e.message)}</div>`;
+    }
+  }
+  
+  _closeMobileSidebarAfterPanelSelection();
+}
+
+function _renderRuntimeRunDetail(data, box) {
+  if (!data || !box) {
+    box && (box.innerHTML = `<div style="color:var(--muted);text-align:center;padding:40px">No data</div>`);
+    return;
+  }
+  
+  const summary = data.summary || {};
+  const reliability = data.reliability || {};
+  const timeline = Array.isArray(data.timeline) ? data.timeline : [];
+  
+  // Format duration to human-readable (e.g. 120ms, 4.2s, 12m 14s)
+  const formatDuration = (seconds) => {
+    if (seconds === undefined || seconds === null || seconds === '—') return '—';
+    const s = Number(seconds);
+    if (isNaN(s)) return '—';
+    if (s < 1) return `${Math.round(s * 1000)}ms`;
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const mins = Math.floor(s / 60);
+    const remSecs = Math.round(s % 60);
+    if (mins < 60) return remSecs > 0 ? `${mins}m ${remSecs}s` : `${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
+  };
+  
+  // Look up session title
+  let sessionTitle = 'Unknown session';
+  if (data.session_id && typeof _allSessions !== 'undefined') {
+    const session = _allSessions.find(s => s && s.session_id === data.session_id);
+    if (session) {
+      sessionTitle = (typeof _sessionDisplayTitle === 'function')
+        ? _sessionDisplayTitle(session)
+        : (session.title || session.display_title || 'Unknown session');
+    }
+  }
+  
+  const statusColor = {
+    completed: 'var(--success)',
+    running: 'var(--accent)',
+    failed: 'var(--danger)',
+    interrupted: 'var(--warning)',
+  }[summary.status] || 'var(--muted)';
+
+  // Build Reliability Snapshot badges
+  let relBadge = '<span class="flow-step-badge flow-step-badge--success">All Steps Succeeded</span>';
+  if (reliability.failed_steps > 0) {
+    relBadge = `<span class="flow-step-badge flow-step-badge--failed">❌ ${reliability.failed_steps} Step Failed</span>`;
+  } else if (reliability.slow_steps > 0) {
+    relBadge = `<span class="flow-step-badge flow-step-badge--slow">⚠️ ${reliability.slow_steps} Slow Step(s)</span>`;
+  }
+
+  let bottleneckHtml = '';
+  if (reliability.slowest_step && reliability.slowest_step.duration_seconds >= 1.0) {
+    bottleneckHtml = `<span>🐢 Slowest: <strong>${esc(reliability.slowest_step.title || 'Step')}</strong> (${formatDuration(reliability.slowest_step.duration_seconds)})</span>`;
+  }
+  
+  let html = `
+    <div class="insights-card" style="margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+        <div style="min-width:0;flex:1">
+          <div style="font-size:16px;font-weight:600;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sessionTitle)}</div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--muted)">
+            <span style="display:inline-flex;align-items:center;gap:4px">
+              <span style="width:8px;height:8px;border-radius:50%;background:${statusColor};display:inline-block"></span>
+              <strong style="color:var(--text);text-transform:capitalize">${esc(summary.status || 'unknown')}</strong>
+            </span>
+            <span>Duration: <strong>${esc(formatDuration(summary.duration_seconds))}</strong></span>
+            <span>${reliability.total_steps || timeline.length} Steps</span>
+            ${relBadge}
+            ${bottleneckHtml}
+          </div>
+        </div>
+        <div style="text-align:right;font-size:11px;color:var(--muted);flex-shrink:0">
+          <div>Run: <code>${esc(data.run_id?.slice(0, 8) || '?')}</code></div>
+          <div>Session: <code>${esc(data.session_id?.slice(0, 8) || '?')}</code></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="insights-card">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div class="insights-card-title" style="font-size:14px;font-weight:600">Execution Flow</div>
+        <span style="font-size:11px;color:var(--muted)">${timeline.length} Steps</span>
+      </div>
+      <div class="flow-container">
+  `;
+  
+  if (timeline.length === 0) {
+    html += `<div style="color:var(--muted);font-size:12px;text-align:center;padding:20px">No execution steps logged</div>`;
+  } else {
+    timeline.forEach((item, idx) => {
+      const stepId = `flow_step_${idx}`;
+      const icon = item.icon || '📌';
+      const title = item.title || item.type || 'Step';
+      const target = item.target || '';
+      const durStr = item.duration_seconds ? formatDuration(item.duration_seconds) : '';
+      const isSlow = item.is_slow || item.duration_seconds >= 30.0;
+      const isFailed = item.status === 'failed' || item.status === 'error';
+      const isRunning = item.status === 'running';
+
+      let stepClass = 'flow-step';
+      if (isFailed) stepClass += ' flow-step--failed';
+      else if (isSlow) stepClass += ' flow-step--slow';
+
+      let badgeClass = 'flow-step-badge--info';
+      let badgeLabel = item.status || 'done';
+      if (isFailed) {
+        badgeClass = 'flow-step-badge--failed';
+        badgeLabel = item.details?.exit_code !== undefined ? `Exit ${item.details.exit_code}` : 'Failed';
+      } else if (isSlow) {
+        badgeClass = 'flow-step-badge--slow';
+        badgeLabel = 'Slow';
+      } else if (isRunning) {
+        badgeClass = 'flow-step-badge--running';
+        badgeLabel = 'Running';
+      } else if (item.status === 'success' || item.status === 'completed') {
+        badgeClass = 'flow-step-badge--success';
+        badgeLabel = 'Completed';
+      }
+
+      html += `
+        <div class="${stepClass}">
+          <div class="flow-step-header" onclick="document.getElementById('${stepId}').toggleAttribute('hidden')">
+            <div class="flow-step-main">
+              <span class="flow-step-icon">${icon}</span>
+              <div class="flow-step-title-group">
+                <div class="flow-step-title">
+                  <span>${esc(title)}</span>
+                </div>
+                ${target ? `<div class="flow-step-target">${esc(target)}</div>` : ''}
+              </div>
+            </div>
+            <div class="flow-step-meta">
+              ${durStr ? `<span class="flow-step-duration">${esc(durStr)}</span>` : ''}
+              <span class="flow-step-badge ${badgeClass}">${esc(badgeLabel)}</span>
+            </div>
+          </div>
+          
+          <div class="flow-step-details" id="${stepId}" hidden>
+            ${isFailed && item.details?.error ? `
+              <div class="flow-step-callout flow-step-callout--danger">
+                <span>❌ <strong>Error:</strong> ${esc(item.details.error)}</span>
+              </div>
+            ` : ''}
+
+            ${isSlow ? `
+              <div class="flow-step-callout flow-step-callout--warning">
+                <span>⚠️ <strong>Slow Execution:</strong> Step took ${esc(durStr)} to complete.</span>
+              </div>
+            ` : ''}
+
+            ${item.details?.text ? `
+              <div>
+                <strong style="color:var(--text)">Thinking / Reasoning:</strong>
+                <pre>${esc(item.details.text)}</pre>
+              </div>
+            ` : ''}
+
+            ${item.details?.command ? `
+              <div>
+                <strong style="color:var(--text)">Command:</strong>
+                <pre>${esc(item.details.command)}</pre>
+              </div>
+            ` : ''}
+
+            ${item.details?.result ? `
+              <div>
+                <strong style="color:var(--text)">Result Preview:</strong>
+                <pre>${esc(item.details.result)}</pre>
+              </div>
+            ` : ''}
+
+            ${item.details?.args && Object.keys(item.details.args).length > 0 ? `
+              <div>
+                <strong style="color:var(--text)">Arguments:</strong>
+                <pre>${esc(JSON.stringify(item.details.args, null, 2))}</pre>
+              </div>
+            ` : ''}
+
+            <div style="font-size:10px;color:var(--muted);display:flex;gap:12px;margin-top:4px">
+              <span>Seq: ${item.seq || '—'}</span>
+              <span>Timestamp: ${item.timestamp ? new Date(item.timestamp * 1000).toLocaleString() : '—'}</span>
+            </div>
+          </div>
+        </div>
+      `;
+    });
+  }
+  
+  html += `</div></div>`;
+  box.innerHTML = html;
+}
+
+function _setRuntimeHeaderButtons(mode) {
+  const header = $('mainRuntime')?.querySelector('.main-view-header');
+  const refreshBtn = $('btnRefreshRuntimeDetail');
+  const show = b => b && (b.style.display = '');
+  const hide = b => b && (b.style.display = 'none');
+  
+  if (mode === 'read') {
+    if (header) header.style.display = 'flex';
+    show(refreshBtn);
+  } else if (mode === 'empty') {
+    if (header) header.style.display = 'none';
+    hide(refreshBtn);
   }
 }
 
